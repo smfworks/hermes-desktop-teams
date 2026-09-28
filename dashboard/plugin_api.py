@@ -605,23 +605,27 @@ def dispatch(
     return 403, {"ok": False, "error": "disallowed_path"}
 
 
-def _request_secret(headers: Mapping[str, str], query: Mapping[str, str]) -> str:
-    header = (headers.get(SECRET_HEADER) or headers.get(SECRET_HEADER.title()) or "").strip()
-    if not header:
-        for key, value in headers.items():
-            if key.lower() == SECRET_HEADER and value.strip():
-                header = value.strip()
-                break
+def _request_secret(headers: Mapping[str, str]) -> str:
+    """Read the secret from a header. Never from the query string.
+
+    Uvicorn access logs and the desktop API failure log record the request
+    line, including the query. A query parameter would persist the secret.
+    """
+    header = ""
+    for key, value in headers.items():
+        if key.lower() == SECRET_HEADER and str(value).strip():
+            header = str(value).strip()
+            break
     if header:
         return header
     auth = ""
     for key, value in headers.items():
         if key.lower() == "authorization":
-            auth = value.strip()
+            auth = str(value).strip()
             break
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return (query.get(SECRET_QUERY) or "").strip()
+    return ""
 
 
 def _json_response(code: int, body: Dict[str, Any]):
@@ -635,7 +639,7 @@ async def _from_request(request: Request, route_path: str) -> Tuple[int, Dict[st
     # Hermes prefixes the router with ``/api/plugins/hermes-teams-inbox``.
     query = {str(k): str(v) for k, v in request.query_params.items()}
     headers = {str(k).lower(): str(v) for k, v in request.headers.items()}
-    secret = _request_secret(headers, query)
+    secret = _request_secret(headers)
     if not secret and request.method.upper() == "POST":
         try:
             payload = await request.json()
@@ -695,7 +699,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         raw_query = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
         query = {key: values[-1] for key, values in raw_query.items() if values}
-        secret = _request_secret(self.headers, query)
+        secret = _request_secret(self.headers)
         if not secret and method == "POST":
             secret = _secret_from_body(self)
         client_host = self.client_address[0] if self.client_address else ""

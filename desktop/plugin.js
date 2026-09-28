@@ -69,17 +69,34 @@ function joinPath(root, ...parts) {
   return pieces.join(slash)
 }
 
-async function readInstalledSecret() {
-  const bridge = typeof window !== 'undefined' ? window.hermesDesktop : null
-  if (!bridge || typeof bridge.readFileText !== 'function' || typeof bridge.agentPluginsRoot !== 'function') {
-    return ''
+async function resolvePluginRoot(bridge) {
+  if (typeof bridge.agentPluginsRoot === 'function') {
+    try {
+      const root = await bridge.agentPluginsRoot()
+      if (root) return String(root)
+    } catch {
+      // Typed on the desktop bridge, but current preload builds do not bind it.
+    }
   }
-  let root = ''
+  // logsRoot is the implemented twin: same profile home, final segment "logs".
+  // Agent plugins live in the sibling "plugins" directory.
+  if (typeof bridge.logsRoot !== 'function') return ''
   try {
-    root = await bridge.agentPluginsRoot()
+    const logs = String((await bridge.logsRoot()) || '')
+    const parts = logs.split(/[/\\]/)
+    if (!parts.length || parts[parts.length - 1].toLowerCase() !== 'logs') return ''
+    const slash = logs.includes('\\') ? '\\' : '/'
+    parts[parts.length - 1] = 'plugins'
+    return parts.join(slash)
   } catch {
     return ''
   }
+}
+
+async function readInstalledSecret() {
+  const bridge = typeof window !== 'undefined' ? window.hermesDesktop : null
+  if (!bridge || typeof bridge.readFileText !== 'function') return ''
+  const root = await resolvePluginRoot(bridge)
   if (!root) return ''
   try {
     const result = await bridge.readFileText(joinPath(root, ID, 'proxy.secret'))
@@ -93,23 +110,9 @@ async function readInstalledSecret() {
 
 async function ensureSecret(force) {
   if (secretCache && !force) return secretCache
-  if (!force && pluginCtx?.storage) {
-    const stored = pluginCtx.storage.get('proxySecret', '')
-    if (stored) {
-      secretCache = stored
-      return stored
-    }
-  }
   const secret = await readInstalledSecret()
-  if (secret) {
-    secretCache = secret
-    try {
-      pluginCtx?.storage?.set('proxySecret', secret)
-    } catch {
-      // Persistence is a cache. The file remains the source of truth.
-    }
-  }
-  return secret
+  secretCache = secret || ''
+  return secretCache
 }
 
 async function rest(path) {
@@ -137,29 +140,20 @@ async function rest(path) {
       throw err
     }
   }
-  // The desktop REST door forwards the path, not custom headers. The secret
-  // stays out of Graph; this process only talks to the local plugin API.
-  const send = (value) => {
-    const join = path.includes('?') ? '&' : '?'
-    return pluginCtx.rest(`${path}${join}proxy_secret=${encodeURIComponent(value)}`)
-  }
+  // pluginCtx.rest accepts method and body, not custom headers. The host
+  // JSON-encodes the body, so the secret is not part of the request line.
+  const send = (value) =>
+    pluginCtx.rest(path, {
+      method: 'POST',
+      body: { proxy_secret: value }
+    })
   try {
     return await send(secret)
   } catch (err) {
     secretCache = ''
-    try {
-      pluginCtx.storage?.remove('proxySecret')
-    } catch {
-      // Ignore a missing storage implementation.
-    }
     const fresh = await readInstalledSecret()
     if (fresh && fresh !== secret) {
       secretCache = fresh
-      try {
-        pluginCtx.storage?.set('proxySecret', fresh)
-      } catch {
-        // See above.
-      }
       return send(fresh)
     }
     throw err

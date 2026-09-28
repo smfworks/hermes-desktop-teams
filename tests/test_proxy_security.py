@@ -149,7 +149,8 @@ def test_desktop_post_body_and_header_are_accepted(client, monkeypatch):
     assert header.status_code == 200
     assert header.json()["teams"] == []
     query = client.get("/status", params={"proxy_secret": secret})
-    assert query.status_code == 200
+    assert query.status_code == 401
+    assert query.json()["error"] == "unauthorized"
     bearer = client.get("/status", headers={"Authorization": f"Bearer {secret}"})
     assert bearer.status_code == 200
 
@@ -193,8 +194,17 @@ def test_proxy_listens_on_localhost_by_default(home, monkeypatch):
         payload = json.loads(caught.value.read().decode("utf-8"))
         assert payload["error"] == "unauthorized"
         secret = api.ensure_proxy_secret()
-        authed = urllib.request.Request(
+        leaked = urllib.request.Request(
             f"http://127.0.0.1:{port}/status?proxy_secret={urllib.parse.quote(secret)}"
+        )
+        with pytest.raises(urllib.error.HTTPError) as leaked_error:
+            urllib.request.urlopen(leaked, timeout=5)
+        assert leaked_error.value.code == 401
+        authed = urllib.request.Request(
+            f"http://127.0.0.1:{port}/status",
+            data=json.dumps({"proxy_secret": secret}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
         with urllib.request.urlopen(authed, timeout=5) as resp:
             assert resp.status == 200
@@ -247,9 +257,10 @@ def test_channels_response_shape_and_web_url_filter(client, monkeypatch):
         }
 
     monkeypatch.setattr(api, "graph_get", fake_graph_get)
-    response = client.get(
+    response = client.post(
         "/channels",
-        params={"team_id": "12345678-1234-1234-1234-123456789abc", "proxy_secret": _secret()},
+        params={"team_id": "12345678-1234-1234-1234-123456789abc"},
+        json={"proxy_secret": _secret()},
     )
     assert response.status_code == 200
     body = response.json()

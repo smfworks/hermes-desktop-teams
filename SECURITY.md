@@ -6,7 +6,8 @@ This plugin reads Microsoft Graph with the machine Azure CLI token (`az account 
 
 - The standalone proxy binds to **127.0.0.1** (or `::1`) unless `HERMES_TEAMS_PROXY_ALLOW_REMOTE=1` is set. Do not publish it on a LAN or the public internet.
 - When Hermes mounts the plugin routes, requests from non-loopback clients are rejected unless that same opt-in is set.
-- Every Graph route requires a **per-install secret**. It is created on first local use at `<HERMES_HOME>/plugins/hermes-teams-inbox/proxy.secret` with mode `0600` (the directory is `0700`). On Windows, those mode bits are not a user ACL; the profile directory is what keeps other accounts out. The desktop client reads that file and sends it. The API never returns the secret or the Azure CLI access token.
+- Every Graph route requires a **per-install secret**. It is created on first local use at `<HERMES_HOME>/plugins/hermes-teams-inbox/proxy.secret` with mode `0600` (the directory is `0700`). On Windows, those mode bits are not a user ACL; the profile directory is what keeps other accounts out. The desktop client reads that file and sends it in a POST JSON body (`proxy_secret`). The API never returns the secret or the Azure CLI token, and it ignores `proxy_secret` on the query string so the value is not written into access logs.
+- Mode `0600` stops other OS accounts. It does not stop other processes running as the same user. Any of those processes can read `proxy.secret`. Other Hermes Desktop plugins share the renderer file bridge (`readFileText`) and can read that path too. The secret is a boundary against other users, remote callers, and web pages, not against same-user code or sibling plugins.
 - `AZ_CMD`, if set, must be an absolute path to the Azure CLI binary. Relative values are ignored.
 
 ## Graph surface

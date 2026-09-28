@@ -36,7 +36,7 @@ The plugin API is not open just because Azure CLI is logged in. On first use it 
 <HERMES_HOME>/plugins/hermes-teams-inbox/proxy.secret
 ```
 
-The file is mode `0600` and the directory is `0700`. Hermes Desktop reads that file (same Hermes home as the backend) and sends it as `proxy_secret`. You do not copy it by hand for a normal local install. Callers outside the app send it in the `X-Hermes-Teams-Proxy-Secret` header, `Authorization: Bearer`, or the `proxy_secret` query/body field.
+The file is mode `0600` and the directory is `0700`. Hermes Desktop reads that file (same Hermes home as the backend) and sends it in a POST JSON body (`proxy_secret`), not on the URL. You do not copy it by hand for a normal local install. Other callers send `X-Hermes-Teams-Proxy-Secret` or `Authorization: Bearer`. A `proxy_secret` query parameter is ignored.
 
 A standalone server, if you run one, listens on **127.0.0.1:8765** only:
 
