@@ -27,11 +27,31 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'hermes-teams-inbox'
 const ROUTE = '/teams'
+const TEAMS_WEB_HOSTS = [
+  'teams.microsoft.com',
+  'teams.microsoft.us',
+  'gov.teams.microsoft.us',
+  'teams.live.com',
+  'teams.cloud.microsoft'
+]
 
 let pluginCtx = null
+let secretCache = ''
+
+function isAllowedTeamsUrl(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:') return false
+    if (parsed.username || parsed.password) return false
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
+    return TEAMS_WEB_HOSTS.some((name) => host === name || host.endsWith('.' + name))
+  } catch {
+    return false
+  }
+}
 
 function openUrl(url) {
-  if (!url) return
+  if (!isAllowedTeamsUrl(url)) return
   const opener = pluginCtx?.os?.openExternal
   if (typeof opener === 'function') {
     void opener(url)
@@ -40,13 +60,110 @@ function openUrl(url) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+function joinPath(root, ...parts) {
+  const slash = String(root).includes('\\') ? '\\' : '/'
+  const pieces = [String(root).replace(/[\\/]+$/, '')]
+  for (const part of parts) {
+    pieces.push(String(part).replace(/^[\\/]+|[\\/]+$/g, ''))
+  }
+  return pieces.join(slash)
+}
+
+async function readInstalledSecret() {
+  const bridge = typeof window !== 'undefined' ? window.hermesDesktop : null
+  if (!bridge || typeof bridge.readFileText !== 'function' || typeof bridge.agentPluginsRoot !== 'function') {
+    return ''
+  }
+  let root = ''
+  try {
+    root = await bridge.agentPluginsRoot()
+  } catch {
+    return ''
+  }
+  if (!root) return ''
+  try {
+    const result = await bridge.readFileText(joinPath(root, ID, 'proxy.secret'))
+    const text = String(result?.text || '').trim()
+    if (!text || result?.truncated) return ''
+    return text.split(/\s+/)[0]
+  } catch {
+    return ''
+  }
+}
+
+async function ensureSecret(force) {
+  if (secretCache && !force) return secretCache
+  if (!force && pluginCtx?.storage) {
+    const stored = pluginCtx.storage.get('proxySecret', '')
+    if (stored) {
+      secretCache = stored
+      return stored
+    }
+  }
+  const secret = await readInstalledSecret()
+  if (secret) {
+    secretCache = secret
+    try {
+      pluginCtx?.storage?.set('proxySecret', secret)
+    } catch {
+      // Persistence is a cache. The file remains the source of truth.
+    }
+  }
+  return secret
+}
+
 async function rest(path) {
   if (!pluginCtx?.rest) {
     const err = new Error('backend-off')
     err.backend = false
     throw err
   }
-  return pluginCtx.rest(path)
+  let secret = await ensureSecret(false)
+  if (!secret) {
+    // A rejected local call creates the secret file. It is not in the response.
+    let probeError = null
+    try {
+      await pluginCtx.rest(path)
+    } catch (err) {
+      probeError = err
+    }
+    secret = await ensureSecret(true)
+    if (!secret) {
+      const probeMessage = String(probeError?.message || '')
+      if (probeError && !/401|unauthorized/i.test(probeMessage)) {
+        throw probeError
+      }
+      const err = new Error('proxy-secret-unavailable')
+      throw err
+    }
+  }
+  // The desktop REST door forwards the path, not custom headers. The secret
+  // stays out of Graph; this process only talks to the local plugin API.
+  const send = (value) => {
+    const join = path.includes('?') ? '&' : '?'
+    return pluginCtx.rest(`${path}${join}proxy_secret=${encodeURIComponent(value)}`)
+  }
+  try {
+    return await send(secret)
+  } catch (err) {
+    secretCache = ''
+    try {
+      pluginCtx.storage?.remove('proxySecret')
+    } catch {
+      // Ignore a missing storage implementation.
+    }
+    const fresh = await readInstalledSecret()
+    if (fresh && fresh !== secret) {
+      secretCache = fresh
+      try {
+        pluginCtx.storage?.set('proxySecret', fresh)
+      } catch {
+        // See above.
+      }
+      return send(fresh)
+    }
+    throw err
+  }
 }
 
 function TeamsPage() {
@@ -78,10 +195,16 @@ function TeamsPage() {
   }
 
   if (status.isError || status.data?.ok === false) {
-    const backendOff = String(status.error?.message || '') === 'backend-off'
+    const message = String(status.error?.message || '')
+    const backendOff = message === 'backend-off'
+    const secretMissing = message === 'proxy-secret-unavailable'
     return jsx(ErrorState, {
       title: backendOff ? t('backendError') : t('authError'),
-      description: backendOff ? t('backendHint') : status.data?.hint || status.data?.error || String(status.error?.message || ''),
+      description: backendOff
+        ? t('backendHint')
+        : secretMissing
+          ? t('proxySecretHint')
+          : status.data?.hint || status.data?.error || message,
       action: jsx(Button, {
         size: 'sm',
         onClick: () => {
@@ -267,6 +390,8 @@ export default {
         backendError: 'Teams backend is off',
         backendHint: 'Enable hermes-teams-inbox (`hermes plugins enable hermes-teams-inbox`) and reload Desktop.',
         authError: 'Graph sign-in needed',
+        proxySecretHint:
+          'The Teams proxy secret was not readable. It is created on first backend start at <HERMES_HOME>/plugins/hermes-teams-inbox/proxy.secret (mode 0600). Reload Desktop after az login.',
         chipTip: 'Microsoft Teams inbox'
       }
     })
